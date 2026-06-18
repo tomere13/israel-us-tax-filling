@@ -1,0 +1,8 @@
+services:
+  tax-filer:
+    build: .
+    image: us-expat-tax-filer
+    container_name: us-expat-tax-filer
+    ports:
+      - "8085:80"
+    restart: unless-stopped
