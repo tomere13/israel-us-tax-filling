@@ -14,6 +14,8 @@ export interface Taxpayer {
   ssn: string; // Stored locally only — never transmitted.
   occupation: string;
   filingStatus: FilingStatus;
+  spouseName?: string;       // MFS/MFJ: spouse full name (printed on the 1040 MFS line)
+  spouseIsNRA?: boolean;     // MFS with a Non-Resident-Alien spouse → SSN box reads "NRA"
   phone: string;
   email: string;
   address: {
@@ -40,6 +42,7 @@ export interface PassiveRecord {
   sourceName: string;
   amountILS: number;
   taxPaidILS: number;
+  isJoint?: boolean; // joint account → taxpayer reports only their 50% share
 }
 
 export interface FbarAccount {

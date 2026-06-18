@@ -26,11 +26,16 @@ export function requiredForms(s: AppState): FormReq[] {
   if (interestDiv > 1_500)
     out.push({ form: "Schedule B", key: "schedB", generated: false });
 
-  const foreignTaxPaid =
-    s.incomes.some((i) => i.taxPaidILS > 0) ||
-    s.passive.some((p) => p.taxPaidILS > 0);
-  if (s.foreignIncomeMethod === "1116" && foreignTaxPaid) {
-    out.push({ form: "Form 1116", key: "f1116", generated: true });
+  const wageTaxPaid = s.incomes.some((i) => i.taxPaidILS > 0);
+  const passiveTaxPaid = s.passive.some((p) => p.taxPaidILS > 0);
+  if (s.foreignIncomeMethod === "1116" && (wageTaxPaid || passiveTaxPaid)) {
+    // A separate 1116 per income category: general (wages) and/or passive (interest etc.).
+    const both = wageTaxPaid && passiveTaxPaid;
+    out.push({
+      form: both ? "Form 1116 ×2" : "Form 1116",
+      key: both ? "f1116x2" : "f1116",
+      generated: true,
+    });
     // The FTC from 1116 reaches the 1040 via Schedule 3 (line 8) — file it too.
     out.push({ form: "Schedule 3", key: "sched3", generated: false });
   }

@@ -87,6 +87,8 @@ export function Step3Passive() {
     const interest = Number(fields.interestILS) || 0;
     const dividends = Number(fields.ordinaryDividendsILS) || 0;
     const gains = Number(fields.netCapitalGainsILS) || 0;
+    const isJoint = Boolean(fields.isJoint); // joint account → 50% share reported
+
     // Assign the withheld tax (field 043) to the first record so it isn't
     // double-counted across categories — it feeds the Foreign Tax Credit.
     let tax = Number(fields.taxWithheldILS) || 0;
@@ -96,11 +98,11 @@ export function Step3Passive() {
       return v;
     };
     if (interest)
-      addPassive({ kind: "interest", sourceName: fileName, amountILS: interest, taxPaidILS: takeTax() });
+      addPassive({ kind: "interest", sourceName: fileName, amountILS: interest, taxPaidILS: takeTax(), isJoint });
     if (dividends)
-      addPassive({ kind: "dividends", sourceName: fileName, amountILS: dividends, taxPaidILS: takeTax() });
+      addPassive({ kind: "dividends", sourceName: fileName, amountILS: dividends, taxPaidILS: takeTax(), isJoint });
     if (gains)
-      addPassive({ kind: "capital_gains", sourceName: fileName, amountILS: gains, taxPaidILS: takeTax() });
+      addPassive({ kind: "capital_gains", sourceName: fileName, amountILS: gains, taxPaidILS: takeTax(), isJoint });
     setQueue((q) => q.slice(1));
   };
 
@@ -182,6 +184,7 @@ export function Step3Passive() {
                   <th className="py-2 pr-3">{t.common.amountILS}</th>
                   <th className="py-2 pr-3">{t.common.taxPaidILS}</th>
                   <th className="py-2 pr-3">{t.common.amountUSD}</th>
+                  <th className="py-2 pr-3">{s.jointLabel}</th>
                   <th className="py-2"></th>
                 </tr>
               </thead>
@@ -242,6 +245,16 @@ export function Step3Passive() {
                     <td className="py-2 pr-3 font-medium text-slate-600">
                       {usd(ilsToUsd(rec.amountILS, rate))}
                     </td>
+                    <td className="py-2 pr-3 text-center">
+                      <input
+                        type="checkbox"
+                        title={s.jointHint}
+                        checked={!!rec.isJoint}
+                        onChange={(e) =>
+                          updatePassive(rec.id, { isJoint: e.target.checked })
+                        }
+                      />
+                    </td>
                     <td className="py-2">
                       <button
                         className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500"
@@ -259,6 +272,7 @@ export function Step3Passive() {
                   <td className="py-3 pr-3">{totalAmount.toLocaleString()} ₪</td>
                   <td className="py-3 pr-3">{totalTax.toLocaleString()} ₪</td>
                   <td className="py-3 pr-3">{usd(ilsToUsd(totalAmount, rate))}</td>
+                  <td></td>
                   <td></td>
                 </tr>
               </tfoot>

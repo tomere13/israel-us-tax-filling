@@ -3,9 +3,59 @@
 // NIIT, the FEIE stacking rule, the SS wage-base cap, the ACTC 15%-of-earnings
 // phase-in, capital-gains rates, and state tax. Good enough to show "you owe ~$0".
 
-import type { AppState } from "../types";
+import type { AppState, PassiveRecord } from "../types";
 import { ilsToUsd } from "./currency";
 import { yearData, bracketTax } from "./taxData";
+
+// Joint account → the taxpayer reports only their 50% share (NRA spouse files nothing).
+export const passiveShareILS = (p: PassiveRecord) => (p.isJoint ? p.amountILS / 2 : p.amountILS);
+export const passiveTaxShareILS = (p: PassiveRecord) => (p.isJoint ? p.taxPaidILS / 2 : p.taxPaidILS);
+
+// Form 1116 Part III limitation, per income category. credit = min(foreign tax,
+// US tax × (category foreign income ÷ total taxable income)); total capped at US tax.
+export interface CategoryFtc {
+  incomeUsd: number;
+  taxUsd: number;
+  taxIls: number;
+  ratio: number; // line 19
+  limitUsd: number; // line 21
+  creditUsd: number; // line 24 = min(line 14, line 23)
+}
+export interface Ftc1116 {
+  general: CategoryFtc;
+  passive: CategoryFtc;
+  totalCreditUsd: number; // Part IV line 33 = min(US tax, sum of credits)
+}
+export function ftc1116(s: AppState, taxableUsd: number, usTaxUsd: number): Ftc1116 {
+  const sh = shares(s);
+  const cat = (incomeUsd: number, taxUsd: number, taxIls: number): CategoryFtc => {
+    const ratio = taxableUsd > 0 ? Math.min(1, incomeUsd / taxableUsd) : 0;
+    const limitUsd = usTaxUsd * ratio;
+    return { incomeUsd, taxUsd, taxIls, ratio, limitUsd, creditUsd: Math.min(taxUsd, limitUsd) };
+  };
+  const general = cat(sh.wagesUsd, sh.wageTaxUsd, sh.wageTaxILS);
+  const passive = cat(sh.passiveUsd, sh.passiveTaxUsd, sh.passiveTaxILS);
+  const totalCreditUsd = Math.min(usTaxUsd, general.creditUsd + passive.creditUsd);
+  return { general, passive, totalCreditUsd };
+}
+
+/** Taxpayer-share sums used by both the estimate and the PDF filler (single source of truth). */
+export function shares(s: AppState) {
+  const avg = s.exchangeRateAvg;
+  const kindUsd = (k: PassiveRecord["kind"]) =>
+    s.passive.filter((p) => p.kind === k).reduce((a, p) => a + ilsToUsd(passiveShareILS(p), avg), 0);
+  return {
+    wagesUsd: s.incomes.reduce((a, i) => a + ilsToUsd(i.grossAmountILS, avg), 0),
+    wageTaxUsd: s.incomes.reduce((a, i) => a + ilsToUsd(i.taxPaidILS, avg), 0),
+    wageTaxILS: s.incomes.reduce((a, i) => a + i.taxPaidILS, 0),
+    interestUsd: kindUsd("interest"),
+    dividendsUsd: kindUsd("dividends"),
+    gainsUsd: kindUsd("capital_gains"),
+    passiveUsd: s.passive.reduce((a, p) => a + ilsToUsd(passiveShareILS(p), avg), 0),
+    passiveTaxUsd: s.passive.reduce((a, p) => a + ilsToUsd(passiveTaxShareILS(p), avg), 0),
+    passiveTaxILS: s.passive.reduce((a, p) => a + passiveTaxShareILS(p), 0),
+  };
+}
 
 export interface EstimateResult {
   earnedUsd: number;
@@ -39,7 +89,8 @@ export function estimate(s: AppState): EstimateResult {
   const seNetIls = s.selfEmployment.reduce((a, e) => a + (e.grossILS - e.expensesILS), 0);
   const seNetUsd = Math.max(0, ilsToUsd(seNetIls, avg));
   const earnedUsd = salaryUsd + seNetUsd;
-  const passiveUsd = s.passive.reduce((a, p) => a + ilsToUsd(p.amountILS, avg), 0);
+  // Joint passive income is reported at the taxpayer's 50% share.
+  const passiveUsd = s.passive.reduce((a, p) => a + ilsToUsd(passiveShareILS(p), avg), 0);
 
   // FEIE: exclude earned income up to the per-person limit (single-earner assumption).
   const feieExcludedUsd =
@@ -49,13 +100,12 @@ export function estimate(s: AppState): EstimateResult {
   const taxableUsd = Math.max(0, earnedUsd + passiveUsd - feieExcludedUsd - stdDed);
   const tentativeTaxUsd = bracketTax(taxableUsd, yd.brackets[s.taxpayer.filingStatus]);
 
-  // Foreign tax credit (method 1116): Israeli tax paid offsets US tax.
-  const foreignTaxPaidUsd =
-    s.incomes.reduce((a, i) => a + ilsToUsd(i.taxPaidILS, avg), 0) +
-    s.passive.reduce((a, p) => a + ilsToUsd(p.taxPaidILS, avg), 0);
+  // Foreign tax credit (method 1116): each category's credit is capped by the
+  // Form 1116 Part III limitation (US tax × foreign-income ratio), then the total
+  // is capped at US tax (Part IV). See ftc1116().
   const foreignTaxCreditUsd =
     s.foreignIncomeMethod === "1116"
-      ? Math.min(tentativeTaxUsd, foreignTaxPaidUsd)
+      ? ftc1116(s, taxableUsd, tentativeTaxUsd).totalCreditUsd
       : 0;
 
   const taxAfterFtc = Math.max(0, tentativeTaxUsd - foreignTaxCreditUsd);
@@ -179,6 +229,32 @@ export function demo() {
     `NIIT should be 3.8%×$70k=$2,660, got ${niit.niitUsd}`
   );
   console.assert(niit.niitUsd > 0 && niit.estimatedOwedUsd > 0, "NIIT owed despite full FTC");
+
+  // Joint passive interest is reported at 50%: $10k interest joint → $5k in passiveUsd.
+  const joint = estimate({
+    ...base,
+    passive: [{ id: "p", kind: "interest", sourceName: "Bank", amountILS: 10000 * 3.451, taxPaidILS: 1500 * 3.451, isJoint: true }],
+  });
+  console.assert(Math.abs(joint.passiveUsd - 5000) < 1, `joint interest should be 50% ($5k), got ${joint.passiveUsd}`);
+
+  // Form 1116 Part III limitation (the user's case): taxable $29,127, US tax $3,257.
+  // Passive: $560 income → ratio 0.0192 → limit ~$63 < $84 paid → credit capped at $63.
+  // General: wages ratio caps at 1 → limit = full tax $3,257 < $12,355 paid → credit $3,257.
+  const lim = ftc1116(
+    {
+      ...base,
+      foreignIncomeMethod: "1116",
+      taxpayer: { ...base.taxpayer, filingStatus: "Married filing separately" },
+      incomes: [{ id: "1", sourceName: "j", grossAmountILS: 105000 * 3.5, taxPaidILS: 12355 * 3.5 }],
+      passive: [{ id: "p", kind: "interest", sourceName: "b", amountILS: 560 * 3.5 * 2, taxPaidILS: 84 * 3.5 * 2, isJoint: true }],
+      exchangeRateAvg: 3.5,
+    } as AppState,
+    29127,
+    3257
+  );
+  console.assert(Math.round(lim.passive.creditUsd) === 63, `passive credit limited to ~$63, got ${lim.passive.creditUsd}`);
+  console.assert(Math.round(lim.general.creditUsd) === 3257, `general credit capped at US tax $3,257, got ${lim.general.creditUsd}`);
+  console.assert(lim.totalCreditUsd <= 3257, "total FTC never exceeds US tax");
 
   console.log("estimate demo ok");
 }

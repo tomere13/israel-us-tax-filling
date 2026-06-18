@@ -25,6 +25,9 @@ function initialFields(r: ExtractionResult): Editable {
         ordinaryDividendsILS: d.ordinaryDividendsILS,
         netCapitalGainsILS: d.netCapitalGainsILS,
         taxWithheldILS: d.taxWithheldILS,
+        // Joint account (e.g. held with an NRA spouse) → report only the 50% share.
+        // Can't be read reliably off the 867, so let the user declare it here.
+        isJoint: false,
       };
     }
     case DocumentType.BANK_FBAR: {
@@ -50,7 +53,7 @@ const FIELD_LABELS: Record<string, string> = {
   bankName: "Bank name",
   accountNumber: "Account number",
   maxBalanceILS: "Maximum balance during year (₪)",
-  isJoint: "Joint account",
+  isJoint: "Joint account (report only your 50% share)",
 };
 
 const MONEY_FIELDS = new Set([

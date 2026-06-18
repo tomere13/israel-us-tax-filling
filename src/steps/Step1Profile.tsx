@@ -91,6 +91,30 @@ export function Step1Profile() {
               ))}
             </select>
           </div>
+          {(taxpayer.filingStatus === "Married filing separately" ||
+            taxpayer.filingStatus === "Married filing jointly") && (
+            <div>
+              <label className="label">{s.spouseName}</label>
+              <input
+                className="input"
+                placeholder={s.spouseNamePlaceholder}
+                value={taxpayer.spouseName ?? ""}
+                onChange={(e) => updateTaxpayer({ spouseName: e.target.value })}
+              />
+              {taxpayer.filingStatus === "Married filing separately" && (
+                <label className="mt-2 flex items-center gap-2 text-sm text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={!!taxpayer.spouseIsNRA}
+                    onChange={(e) =>
+                      updateTaxpayer({ spouseIsNRA: e.target.checked })
+                    }
+                  />
+                  {s.spouseNra}
+                </label>
+              )}
+            </div>
+          )}
           <div>
             <label className="label">{s.phone}</label>
             <input

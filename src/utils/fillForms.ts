@@ -9,9 +9,18 @@
 import { PDFDocument, PDFTextField, PDFCheckBox } from "pdf-lib";
 import type { AppState } from "../types";
 import { ilsToUsd } from "./currency";
-import { estimate } from "./estimate";
+import { estimate, shares, ftc1116 } from "./estimate";
 import { yearData } from "./taxData";
-import { F1040, F1116, F2555, FILING_STATUS_1040_FIELD } from "./formFields2025";
+import {
+  F1040,
+  F1116,
+  F2555,
+  FILING_STATUS_1040_FIELD,
+  F1116_CATEGORY,
+  F1116_PAID_BOX,
+} from "./formFields2025";
+
+const US_COUNTRY = /^(us|u\.s\.|usa|united states)$/i;
 
 const ISRAEL = "Israel";
 
@@ -61,32 +70,30 @@ interface Values1040 {
 
 function values1040(s: AppState): Values1040 {
   const est = estimate(s);
+  const sh = shares(s);
   const yd = yearData(s.taxYear);
   const tp = s.taxpayer;
-  const salaryUsd = s.incomes.reduce(
-    (a, i) => a + ilsToUsd(i.grossAmountILS, s.exchangeRateAvg),
-    0
-  );
-  const totalIncome = salaryUsd + est.passiveUsd;
+  // All passive figures are the taxpayer's share (joint accounts already halved).
+  const totalIncome = sh.wagesUsd + sh.interestUsd + sh.dividendsUsd + sh.gainsUsd;
   const agi = totalIncome - est.feieExcludedUsd;
   const stdDed = yd.stdDeduction[tp.filingStatus];
   const taxAfterCredits = Math.max(
     0,
     est.tentativeTaxUsd - est.foreignTaxCreditUsd - est.ctcUsd
   );
-  const totalTax = taxAfterCredits + est.seTaxUsd;
+  const totalTax = taxAfterCredits + est.seTaxUsd + est.niitUsd;
 
-  const isMfj = tp.filingStatus === "Married filing jointly";
   const text: Record<string, string> = {
     [F1040.firstNameMI]: tp.firstName,
     [F1040.lastName]: tp.lastName,
     [F1040.ssn]: tp.ssn,
     [F1040.address]: tp.address.street,
     [F1040.city]: tp.address.city,
-    [F1040.zip]: tp.address.zip,
-    [F1040.foreignCountry]: tp.address.country || ISRAEL,
-    [F1040.line1aWages]: m(salaryUsd),
-    [F1040.line1zWages]: m(salaryUsd),
+    [F1040.line1aWages]: m(sh.wagesUsd),
+    [F1040.line1zWages]: m(sh.wagesUsd),
+    [F1040.line2bInterest]: m(sh.interestUsd),
+    [F1040.line3bDividends]: m(sh.dividendsUsd),
+    [F1040.line7CapGain]: m(sh.gainsUsd),
     [F1040.line9TotalIncome]: m(totalIncome),
     [F1040.line11Agi]: m(agi),
     [F1040.line12StdDeduction]: m(stdDed),
@@ -95,35 +102,75 @@ function values1040(s: AppState): Values1040 {
     [F1040.line22]: m(taxAfterCredits),
     [F1040.line24TotalTax]: m(totalTax),
   };
+
+  // Foreign address: route to the foreign-address fields; leave US state/ZIP blank.
+  const country = (tp.address.country || "").trim();
+  if (country !== "" && !US_COUNTRY.test(country)) {
+    text[F1040.foreignCountry] = country;
+    text[F1040.foreignPostal] = tp.address.zip;
+  } else {
+    text[F1040.zip] = tp.address.zip;
+  }
+
+  // MFS with a Non-Resident-Alien spouse: name on the MFS line, "NRA" in the SSN box.
+  if (tp.filingStatus === "Married filing separately") {
+    if (tp.spouseName) text[F1040.spouseNameMfs] = tp.spouseName;
+    if (tp.spouseIsNRA) text[F1040.spouseSsn] = "NRA";
+  }
+
   if (s.foreignIncomeMethod === "1116")
     text[F1040.line20Sched3] = m(est.foreignTaxCreditUsd);
   if (est.estimatedOwedUsd > 0) text[F1040.line37Owe] = m(est.estimatedOwedUsd);
   else if (est.estimatedOwedUsd < 0)
     text[F1040.line34Refund] = m(-est.estimatedOwedUsd);
-  void isMfj;
   return { text, filingStatus: tp.filingStatus };
 }
 
-function values1116(s: AppState): Record<string, string> {
+export type Category1116 = "general" | "passive";
+
+interface Form1116 {
+  text: Record<string, string>;
+  checkBoxes: string[];
+}
+
+/** One Form 1116 per income category: general (wages) or passive (interest/div/gains). */
+function values1116(s: AppState, category: Category1116): Form1116 {
   const est = estimate(s);
   const tp = s.taxpayer;
-  const foreignIncomeUsd =
-    s.incomes.reduce((a, i) => a + ilsToUsd(i.grossAmountILS, s.exchangeRateAvg), 0) +
-    est.passiveUsd;
-  const foreignTaxPaidUsd =
-    s.incomes.reduce((a, i) => a + ilsToUsd(i.taxPaidILS, s.exchangeRateAvg), 0) +
-    s.passive.reduce((a, p) => a + ilsToUsd(p.taxPaidILS, s.exchangeRateAvg), 0);
-  return {
+  const ftc = ftc1116(s, est.taxableUsd, est.tentativeTaxUsd);
+  const c = ftc[category]; // { incomeUsd, taxUsd, taxIls, ratio, limitUsd, creditUsd }
+  const text: Record<string, string> = {
     [F1116.name]: `${tp.firstName} ${tp.lastName}`.trim(),
     [F1116.ssn]: tp.ssn,
     [F1116.residentCountry]: ISRAEL,
-    [F1116.line1aGrossIncomeColA]: m(foreignIncomeUsd),
-    [F1116.line7NetForeignIncome]: m(foreignIncomeUsd),
-    [F1116.line14TotalForeignTax]: m(foreignTaxPaidUsd),
+    [F1116.partICountryA]: ISRAEL,
+    [F1116.line1aGrossIncomeColA]: m(c.incomeUsd),
+    [F1116.line7NetForeignIncome]: m(c.incomeUsd),
+    [F1116.line14TotalForeignTax]: m(c.taxUsd),
+    // Part III limitation: credit = min(foreign tax, US tax × income ratio).
+    [F1116.line15NetForeign]: m(c.incomeUsd),
+    [F1116.line17NetForeignTaxable]: m(c.incomeUsd),
+    [F1116.line18TotalTaxable]: m(est.taxableUsd),
+    [F1116.line19Ratio]: c.ratio > 0 ? c.ratio.toFixed(4) : "",
     [F1116.line20TaxAgainstCredit]: m(est.tentativeTaxUsd),
-    [F1116.line24CategoryCredit]: m(est.foreignTaxCreditUsd),
-    [F1116.line35CreditToSched3]: m(est.foreignTaxCreditUsd),
+    [F1116.line21Limitation]: m(c.limitUsd),
+    [F1116.line23]: m(c.limitUsd),
+    [F1116.line24CategoryCredit]: m(c.creditUsd),
+    [F1116.line33Smaller]: m(c.creditUsd), // Part IV: min(line 20, line 32=line 24)
+    [F1116.line35CreditToSched3]: m(c.creditUsd),
+    [F1116.p2RowTotalUsd]: m(c.taxUsd),
   };
+  // Part II row A: wages → "other" columns; interest/div/gains → interest columns.
+  if (category === "passive") {
+    text[F1116.p2UsdInterest] = m(c.taxUsd);
+    text[F1116.p2NisInterest] = m(c.taxIls);
+  } else {
+    text[F1116.p2UsdOther] = m(c.taxUsd);
+    text[F1116.p2NisOther] = m(c.taxIls);
+  }
+  const categoryBox =
+    category === "general" ? F1116_CATEGORY.general : F1116_CATEGORY.passive;
+  return { text, checkBoxes: [categoryBox, F1116_PAID_BOX] };
 }
 
 function values2555(s: AppState): Record<string, string> {
@@ -148,15 +195,27 @@ function values2555(s: AppState): Record<string, string> {
 
 // ---- fill + assemble -------------------------------------------------------
 
+interface FillOpts {
+  filingStatus?: string;
+  checkBoxes?: string[]; // full field names to .check() (1116 category + Paid box)
+}
+
 async function fillDoc(
   blank: Uint8Array | ArrayBuffer,
   text: Record<string, string>,
-  filingStatus?: string
+  opts: FillOpts = {}
 ): Promise<{ doc: PDFDocument; form: ReturnType<PDFDocument["getForm"]>; missing: string[] }> {
   const doc = await PDFDocument.load(blank);
   const form = doc.getForm();
   const missing = applyText(form, text);
-  if (filingStatus) selectFilingStatus(form, filingStatus);
+  if (opts.filingStatus) selectFilingStatus(form, opts.filingStatus);
+  for (const cb of opts.checkBoxes ?? []) {
+    try {
+      form.getCheckBox(cb).check();
+    } catch {
+      /* field-name drift — skip rather than crash the whole fill */
+    }
+  }
   return { doc, form, missing };
 }
 
@@ -164,9 +223,9 @@ async function fillDoc(
 async function fill(
   blank: Uint8Array | ArrayBuffer,
   text: Record<string, string>,
-  filingStatus?: string
+  opts: FillOpts = {}
 ): Promise<{ bytes: Uint8Array; missing: string[] }> {
-  const { doc, missing } = await fillDoc(blank, text, filingStatus);
+  const { doc, missing } = await fillDoc(blank, text, opts);
   return { bytes: await doc.save(), missing };
 }
 
@@ -193,22 +252,31 @@ export async function generateForms(s: AppState): Promise<GeneratedForm[]> {
   const append = async (
     blankName: string,
     text: Record<string, string>,
-    filingStatus?: string
+    opts: FillOpts = {}
   ) => {
-    const { doc, form } = await fillDoc(
-      await fetchBlank(blankName, s.taxYear),
-      text,
-      filingStatus
-    );
+    const { doc, form } = await fillDoc(await fetchBlank(blankName, s.taxYear), text, opts);
     form.flatten();
     const pages = await merged.copyPages(doc, doc.getPageIndices());
     pages.forEach((p) => merged.addPage(p));
   };
 
   const v1040 = values1040(s);
-  await append("f1040", v1040.text, v1040.filingStatus);
-  if (s.foreignIncomeMethod === "1116") await append("f1116", values1116(s));
-  else await append("f2555", values2555(s));
+  await append("f1040", v1040.text, { filingStatus: v1040.filingStatus });
+
+  if (s.foreignIncomeMethod === "1116") {
+    const sh = shares(s);
+    // One 1116 per category that has foreign tax (general = wages, passive = interest/div/gains).
+    if (sh.wageTaxUsd > 0) {
+      const g = values1116(s, "general");
+      await append("f1116", g.text, { checkBoxes: g.checkBoxes });
+    }
+    if (sh.passiveTaxUsd > 0) {
+      const p = values1116(s, "passive");
+      await append("f1116", p.text, { checkBoxes: p.checkBoxes });
+    }
+  } else {
+    await append("f2555", values2555(s));
+  }
 
   const bytes = await merged.save();
   return [{ name: `irs-forms-${s.taxYear}.pdf`, bytes }];
@@ -225,6 +293,7 @@ export async function demo() {
   const load = (f: string) =>
     new Uint8Array(readFileSync(`public/forms/2025/${f}.pdf`));
 
+  // MFS with an NRA spouse + a joint Bank Leumi account (the owner's real case).
   const sample: AppState = {
     taxYear: 2025,
     exchangeRateAvg: 3.5,
@@ -235,21 +304,23 @@ export async function demo() {
       lastName: "Cohen",
       ssn: "123456789",
       occupation: "Engineer",
-      filingStatus: "Married filing jointly",
+      filingStatus: "Married filing separately",
+      spouseName: "Daniel Vershkov",
+      spouseIsNRA: true,
       phone: "",
       email: "",
-      address: { street: "1 Herzl St", city: "Tel Aviv", zip: "6100000", country: "Israel" },
+      address: { street: "1 Herzl St", city: "Tel Aviv", zip: "8452738", country: "Israel" },
     },
     incomes: [{ id: "1", sourceName: "Employer", grossAmountILS: 420000, taxPaidILS: 110000 }],
-    passive: [{ id: "p", kind: "interest", sourceName: "Bank", amountILS: 12000, taxPaidILS: 3000 }],
+    passive: [{ id: "p", kind: "interest", sourceName: "Bank Leumi", amountILS: 4203, taxPaidILS: 631, isJoint: true }],
     fbarAccounts: [],
     dependents: [],
     selfEmployment: [],
   };
 
-  // 1040: fill, assert no missing tokens, reload and read back a representative box.
+  // 1040: fill, assert no missing tokens, reload and read back representative boxes.
   const v = values1040(sample);
-  const r = await fill(load("f1040"), v.text, v.filingStatus);
+  const r = await fill(load("f1040"), v.text, { filingStatus: v.filingStatus });
   console.assert(r.missing.length === 0, "1040 unresolved tokens: " + r.missing.join(","));
   const back = await PDFDocument.load(r.bytes);
   const f = back.getForm();
@@ -258,19 +329,40 @@ export async function demo() {
     return fld instanceof PDFTextField ? fld.getText() : undefined;
   };
   console.assert(read(F1040.lastName) === "Cohen", "1040 last name round-trip");
-  console.assert(read(F1040.line1zWages) === "120000", "1040 wages round-trip (got " + read(F1040.line1zWages) + ")");
-  // MFJ filing-status box must be checked after fill.
-  const mfjBox = f.getFields().find(
-    (x) => x.getName() === "topmostSubform[0].Page1[0].Checkbox_ReadOrder[0].c1_8[1]"
+  console.assert(read(F1040.spouseNameMfs) === "Daniel Vershkov", "MFS spouse name printed");
+  console.assert(read(F1040.spouseSsn) === "NRA", "NRA in spouse SSN box");
+  // Joint interest 4203/3.5/2 = 600.4 → "600" on line 2b.
+  console.assert(read(F1040.line2bInterest) === "600", "line 2b = 50% joint interest (got " + read(F1040.line2bInterest) + ")");
+  // Foreign address: US ZIP blank, postal in the foreign field.
+  console.assert(!read(F1040.zip), "US ZIP left blank for foreign address");
+  console.assert(read(F1040.foreignPostal) === "8452738", "ZIP routed to foreign postal");
+  // No gap: line 9 = wages (120000) + interest (600).
+  console.assert(read(F1040.line9TotalIncome) === "120600", "line 9 = 1z + 2b (got " + read(F1040.line9TotalIncome) + ")");
+  const mfsBox = f.getFields().find(
+    (x) => x.getName() === "topmostSubform[0].Page1[0].Checkbox_ReadOrder[0].c1_8[2]"
   );
-  console.assert(
-    mfjBox instanceof PDFCheckBox && mfjBox.isChecked(),
-    "1040 MFJ filing-status box checked"
-  );
+  console.assert(mfsBox instanceof PDFCheckBox && mfsBox.isChecked(), "1040 MFS box checked");
 
-  // 1116 + 2555: assert all mapped tokens resolve against the real PDFs.
-  const r1116 = await fill(load("f1116"), values1116(sample));
-  console.assert(r1116.missing.length === 0, "1116 unresolved tokens: " + r1116.missing.join(","));
+  // Two 1116s: general (wages) box /4 and passive (interest) box /3, Part II + Paid set.
+  // Line 24 is the Part III-LIMITED credit, not the raw tax: general is capped at the
+  // US tax ($18,011, ratio→1) below the $31,429 paid; passive ($90) is under its limit.
+  for (const [cat, catFull, creditStr] of [
+    ["general", F1116_CATEGORY.general, "18011"],
+    ["passive", F1116_CATEGORY.passive, "90"],
+  ] as const) {
+    const built = values1116(sample, cat);
+    const rr = await fill(load("f1116"), built.text, { checkBoxes: built.checkBoxes });
+    console.assert(rr.missing.length === 0, `1116 ${cat} unresolved: ` + rr.missing.join(","));
+    const bf = (await PDFDocument.load(rr.bytes)).getForm();
+    const box = bf.getFields().find((x) => x.getName() === catFull);
+    console.assert(box instanceof PDFCheckBox && box.isChecked(), `1116 ${cat} category box checked`);
+    const credit = bf.getFields().find((x) => x.getName().endsWith(F1116.line24CategoryCredit));
+    console.assert(
+      credit instanceof PDFTextField && credit.getText() === creditStr,
+      `1116 ${cat} line 24 = ${creditStr} (got ${credit instanceof PDFTextField ? credit.getText() : "?"})`
+    );
+  }
+
   const r2555 = await fill(load("f2555"), values2555({ ...sample, foreignIncomeMethod: "2555" }));
   console.assert(r2555.missing.length === 0, "2555 unresolved tokens: " + r2555.missing.join(","));
 

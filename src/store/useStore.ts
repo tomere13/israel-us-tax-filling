@@ -185,6 +185,7 @@ export const useStore = create<AppState & { filingSnapshots: FilingSnapshot[] } 
               sourceName: "",
               amountILS: 0,
               taxPaidILS: 0,
+              isJoint: false,
               ...rec,
             },
           ],
